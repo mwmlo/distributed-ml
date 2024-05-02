@@ -4,6 +4,11 @@ from tensorflow import keras
 import keras.layers as layers
 from keras import Sequential
 
+class PrintLR(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None): #pylint: disable=no-self-use
+      print('\nLearning rate for epoch {} is {}'.format(
+        epoch + 1, multi_worker_model.optimizer.lr.numpy()))
+
 def build_and_compile_cnn_model():
   print("Training CNN model")
   model = Sequential()

@@ -29,6 +29,18 @@ def is_chief():
 tf_config = json.loads(os.environ.get('TF_CONFIG') or '{}')
 TASK_INDEX = tf_config['task']['index']
 
+def _preprocess(bytes_inputs):
+    decoded = tf.io.decode_jpeg(bytes_inputs, channels=1)
+    resized = tf.image.resize(decoded, size=(28, 28))
+    return tf.cast(resized, dtype=tf.uint8)
+
+def _get_serve_image_fn(model):
+    @tf.function(input_signature=[tf.TensorSpec([None], dtype=tf.string, name='image_bytes')])
+    def serve_image_fn(bytes_inputs):
+        decoded_images = tf.map_fn(_preprocess, bytes_inputs, dtype=tf.uint8)
+        return model(decoded_images)
+    return serve_image_fn
+
 def main(args):
   with strategy.scope():
     # Create repeated batches of data
@@ -47,14 +59,38 @@ def main(args):
       multi_worker_model = build_and_compile_cnn_model_with_batch_norm()
     else:
       raise Exception("Unsupported model type: %s" % args.model_type)
-    
-  multi_worker_model.fit(ds_train, epochs=1, steps_per_epoch=70)
+  
+  # Define the checkpoint directory to store the checkpoints
+  checkpoint_dir = args.checkpoint_dir
+  checkpoint_prefix = os.path.join(checkpoint_dir, "ckpt_{epoch}")
+  callbacks = [
+    tf.keras.callbacks.TensorBoard(log_dir='./logs'),
+    tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_prefix,
+                                        save_weights_only=True),
+    tf.keras.callbacks.LearningRateScheduler(decay),
+    PrintLR()
+  ]
+
+  multi_worker_model.fit(ds_train,
+                         epochs=1,
+                         steps_per_epoch=70,
+                         callbacks=callbacks)
+  
+  # Save model on chief worker only
   if is_chief():
     model_path = args.saved_model_dir
   else:
     model_path = args.saved_model_dir + '/worker_tmp_' + str(TASK_INDEX)
-    
+  
   multi_worker_model.save(model_path)
+
+  # Define input signature
+  signatures = {
+    "serving_default": _get_serve_image_fn(multi_worker_model).get_concrete_function(
+        tf.TensorSpec(shape=[None], dtype=tf.string, name='image_bytes')
+    )
+  }
+  tf.saved_model.save(multi_worker_model, model_path, signatures=signatures)
 
 if __name__ == '__main__':
   tfds.disable_progress_bar()
